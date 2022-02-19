@@ -5,6 +5,7 @@ from math import sqrt
 import pandas as pd
 from matplotlib import pyplot as plt
 from sklearn.metrics import mean_squared_error
+from statsmodels.tsa.statespace.sarimax import SARIMAX
 from statsmodels.tsa.stattools import adfuller
 from statsmodels.tsa.arima.model import ARIMA
 import numpy as np
@@ -34,6 +35,10 @@ class ArimaModelStats:
         plt.legend()
         plt.show()
 
+    def explain_model(self):
+        print(f"ARIMA model ({self.p} {self.d} {self.q}) ({self.P} {self.D} {self.Q} {self.m}) "
+              f"AIC={self.aic} BIC={self.bic} RMSE={self.rmse}\n")
+
 def check_stationarity(ts):
     dftest = adfuller(ts)
     adf = dftest[0]
@@ -54,17 +59,18 @@ def differentiate_untill_stationary(ts):
     return d
 
 
-def try_different_model_combinations(df_train, df_test, prediction_variable):
-    p_s = range(0, 5)
-    q_s = range(0, 5)
-    d_s = range(0, 5)
-    P_s = range(0, 5)
-    Q_s = range(0, 5)
-    D_s = range(0, 5)
-    m_s = range(0, 365)
+def try_different_model_combinations(p_range, q_range, d_range, P_range, D_range, Q_range,
+                                     m_range, df_train, df_test, prediction_variable):
+    p_s = p_range
+    q_s = q_range
+    d_s = d_range
+    P_s = P_range
+    Q_s = Q_range
+    D_s = D_range
+    m_s = m_range
     best_models = []
     process_results = []
-    processor_count = 5
+    processor_count = 6
 
     all_model_combinations = itertools.product(p_s, d_s, q_s, P_s, D_s, Q_s, m_s)
     all_model_combinations = np.array(list(all_model_combinations))
@@ -72,24 +78,28 @@ def try_different_model_combinations(df_train, df_test, prediction_variable):
     process_pool = multiprocessing.Pool(processor_count)
     array = np.array_split(all_model_combinations, processor_count)
 
-    for i in range(processor_count):
+    for i in range(0, processor_count):
         process_results.append(process_pool.apply_async(test_ARIMA_model_combinations,
-                                                        args=(array[i], df_train, prediction_variable, df_test)))
+                                                        args=(array[i], df_train, prediction_variable, df_test, i)))
 
     for result in process_results:
-        best_models.extend(result.get())
+        result_proc = result.get()
+        print(result_proc)
+        best_models.extend(result_proc)
         print('Process finished!')
 
-    best_models.sort(key=lambda x: (-x.aic, x.rmse, -x.bic))
-    best_models = best_models[:10]
+    best_models.sort(key=lambda x: (x.aic, x.rmse, x.bic))
+    best_models = best_models[0:10]
+    print("BEST MODELS")
     for model in best_models:
         model.draw_graph()
+        model.explain_model()
 
 
-def test_ARIMA_model_combinations(combinations, df_train, prediction_variable, df_test):
-    best_models = []
+def test_ARIMA_model_combinations(combinations, df_train, prediction_variable, df_test, proc_id):
+    models = []
     for combination in combinations:
-        print(f"testing model {combination[0]}, {combination[1]}, {combination[2]} - {combination[3]},"
+        print(f"{proc_id}----testing model {combination[0]}, {combination[1]}, {combination[2]} - {combination[3]},"
               f" {combination[4]}, {combination[5]}, {combination[6]}")
 
         p = combination[0]
@@ -102,24 +112,30 @@ def test_ARIMA_model_combinations(combinations, df_train, prediction_variable, d
         try:
             model = ARIMA(df_train[prediction_variable], order=(p, d, q), seasonal_order=(P, D, Q, m))
             model = model.fit()
-            print(model.summary())
             start = len(df_train)
             end = len(df_train) + len(df_test) - 1
             pred = model.predict(start=start, end=end, typ='levels').rename('ARIMA predictions')
             rmse = sqrt(mean_squared_error(df_test.Close, pred))
-            best_models.append(ArimaModelStats(p, d, q, P, D, Q, m, model.aic,
-                                               model.bic, rmse, pred, df_test.Close))
-            best_models.sort(key=lambda x: (-x.aic, x.rmse, -x.bic))
-            if len(best_models) < 6:
-                best_models.pop(6)
+            models.append(ArimaModelStats(p, d, q, P, D, Q, m, abs(model.aic),
+                                               abs(model.bic), rmse, pred, df_test.Close))
+
         except:
             print('Model failed with error, resuming..')
-        return best_models
+    print(f'---process {proc_id} has finished---')
+    return models
 
 if __name__ == '__main__':
     df = pd.read_csv('../doge_v1.csv', index_col='Date', parse_dates=True)
-    df = df.resample('D').ffill()
-    testNum = round(df.shape[0] * 0.1)
+    df = df.resample('w').mean().ffill()
+    testNum = round(df.shape[0] * 0.12)
+    p_range = range(1, 3)
+    q_range = range(25, 30)
+    d_range = range(1, 3)
+    P_range = [0]
+    D_range = [0]
+    Q_range = [0]
+    m_range = [0]
     train = df.iloc[:-testNum]
     test = df.iloc[-testNum:]
-    try_different_model_combinations(train, test, 'Close')
+    try_different_model_combinations(p_range, q_range, d_range, P_range, D_range, Q_range,
+                                     m_range, train, test, 'Close')

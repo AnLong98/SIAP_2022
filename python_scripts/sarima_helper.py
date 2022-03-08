@@ -4,6 +4,7 @@ from math import sqrt
 
 import pandas as pd
 from matplotlib import pyplot as plt
+from pmdarima import auto_arima
 from sklearn.metrics import mean_squared_error
 from statsmodels.tsa.statespace.sarimax import SARIMAX
 from statsmodels.tsa.stattools import adfuller
@@ -11,7 +12,7 @@ from statsmodels.tsa.arima.model import ARIMA
 import numpy as np
 
 class ArimaModelStats:
-    def __init__(self, p, d, q, P, D, Q, m, aic, bic, rmse, predicted, actual):
+    def __init__(self, p, d, q, P, D, Q, m, aic, bic, rmse, predicted, actual, mape=0):
         self.p = p
         self.q = q
         self.d = d
@@ -24,6 +25,7 @@ class ArimaModelStats:
         self.bic = bic
         self.predicted = predicted
         self.actual = actual
+        self.mape = mape
 
     def draw_graph(self):
         plt.figure(figsize=(10, 6))
@@ -37,7 +39,7 @@ class ArimaModelStats:
 
     def explain_model(self):
         print(f"ARIMA model ({self.p} {self.d} {self.q}) ({self.P} {self.D} {self.Q} {self.m}) "
-              f"AIC={self.aic} BIC={self.bic} RMSE={self.rmse}\n")
+              f"AIC={self.aic} BIC={self.bic} RMSE={self.rmse} MAPE={self.mape}\n")
 
 def check_stationarity(ts):
     dftest = adfuller(ts)
@@ -124,13 +126,42 @@ def test_ARIMA_model_combinations(combinations, df_train, prediction_variable, d
     print(f'---process {proc_id} has finished---')
     return models
 
+def mape(actual,pred):
+    return np.mean(np.abs((actual - pred) / actual)) * 100
+
+def create_lagged_value_columns(lag_features, windows, df):
+    df.reset_index(drop=True, inplace=True)
+    for window in windows:
+        for feature in lag_features:
+            df[f"{feature}_mean_lag{window}"] = df[feature].shift(window)
+
+    df.fillna(df.mean(), inplace=True)
+    df.set_index(["Date"], drop=False, inplace=True)
+    return df
+
+def predict_with_windows(windows, train, test, lag_features):
+    for window in windows:
+        exogs= []
+        for feature in lag_features:
+            exogs.append(f"{feature}_mean_lag{window}")
+
+        model = auto_arima(train.Close, exogenous=train[exogs], trace=True, error_action="ignore",
+                           suppress_warnings=True)
+        model.fit(train.Close, exogenous=train[exogs])
+
+        forecast = model.predict(n_periods=len(test), exogenous=test[exogs])
+        test[f"Forecast_ARIMAX_{window}d_lag"] = forecast
+        test[["Close", f"Forecast_ARIMAX_{window}d_lag"]].plot(figsize=(17, 9))
+        print(f"MAPE for {window} day lag prediction is {mape(test['Close'], forecast)}")
+
+
 if __name__ == '__main__':
     df = pd.read_csv('../doge_v1.csv', index_col='Date', parse_dates=True)
     df = df.resample('w').mean().ffill()
-    testNum = round(df.shape[0] * 0.12)
-    p_range = range(1, 3)
-    q_range = range(25, 30)
-    d_range = range(1, 3)
+    testNum = round(df.shape[0] * 0.1)
+    p_range = range(0, 5)
+    q_range = range(0, 3)
+    d_range = range(0, 5)
     P_range = [0]
     D_range = [0]
     Q_range = [0]

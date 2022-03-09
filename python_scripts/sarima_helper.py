@@ -1,5 +1,6 @@
 import itertools
 import multiprocessing
+import warnings
 from math import sqrt
 
 import pandas as pd
@@ -12,14 +13,10 @@ from statsmodels.tsa.arima.model import ARIMA
 import numpy as np
 
 class ArimaModelStats:
-    def __init__(self, p, d, q, P, D, Q, m, aic, bic, rmse, predicted, actual, mape=0):
+    def __init__(self, p, d, q, aic, bic, rmse, predicted, actual, mape=0):
         self.p = p
         self.q = q
         self.d = d
-        self.P = P
-        self.D = D
-        self.Q = Q
-        self.m = m
         self.rmse = rmse
         self.aic = aic
         self.bic = bic
@@ -38,7 +35,7 @@ class ArimaModelStats:
         plt.show()
 
     def explain_model(self):
-        print(f"ARIMA model ({self.p} {self.d} {self.q}) ({self.P} {self.D} {self.Q} {self.m}) "
+        print(f"ARIMA model ({self.p} {self.d} {self.q}) "
               f"AIC={self.aic} BIC={self.bic} RMSE={self.rmse} MAPE={self.mape}\n")
 
 def check_stationarity(ts):
@@ -61,65 +58,62 @@ def differentiate_untill_stationary(ts):
     return d
 
 
-def try_different_model_combinations(p_range, q_range, d_range, P_range, D_range, Q_range,
-                                     m_range, df_train, df_test, prediction_variable):
+def try_different_model_combinations(p_range, q_range, d_range, df_train, df_test, prediction_variable,
+                                     lag_features, windows):
     p_s = p_range
     q_s = q_range
     d_s = d_range
-    P_s = P_range
-    Q_s = Q_range
-    D_s = D_range
-    m_s = m_range
-    best_models = []
-    process_results = []
+
     processor_count = 6
 
-    all_model_combinations = itertools.product(p_s, d_s, q_s, P_s, D_s, Q_s, m_s)
+    all_model_combinations = itertools.product(p_s, d_s, q_s)
     all_model_combinations = np.array(list(all_model_combinations))
 
     process_pool = multiprocessing.Pool(processor_count)
     array = np.array_split(all_model_combinations, processor_count)
 
-    for i in range(0, processor_count):
-        process_results.append(process_pool.apply_async(test_ARIMA_model_combinations,
-                                                        args=(array[i], df_train, prediction_variable, df_test, i)))
+    for window in windows:
+        exogs= []
+        best_models = []
+        process_results = []
+        for feature in lag_features:
+            exogs.append(f"{feature}_mean_lag{window}")
+        for i in range(0, processor_count):
+            process_results.append(process_pool.apply_async(test_ARIMA_model_combinations,
+                                                            args=(array[i], df_train, prediction_variable,
+                                                                  df_test, i, exogs)))
+            for result in process_results:
+                result_proc = result.get()
+                print(result_proc)
+                best_models.extend(result_proc)
+                print('Process finished!')
 
-    for result in process_results:
-        result_proc = result.get()
-        print(result_proc)
-        best_models.extend(result_proc)
-        print('Process finished!')
-
-    best_models.sort(key=lambda x: (x.aic, x.rmse, x.bic))
-    best_models = best_models[0:10]
-    print("BEST MODELS")
-    for model in best_models:
-        model.draw_graph()
-        model.explain_model()
+            best_models.sort(key=lambda x: (x.aic, x.rmse, x.bic, x.mape))
+            best_model = best_models[0]
+            print(f"BEST MODEL for window {window}")
+            best_model.draw_graph()
+            best_model.explain_model()
 
 
-def test_ARIMA_model_combinations(combinations, df_train, prediction_variable, df_test, proc_id):
+def test_ARIMA_model_combinations(combinations, df_train, prediction_variable, df_test, proc_id, exog_vars):
     models = []
     for combination in combinations:
-        print(f"{proc_id}----testing model {combination[0]}, {combination[1]}, {combination[2]} - {combination[3]},"
-              f" {combination[4]}, {combination[5]}, {combination[6]}")
+        print(f"{proc_id}----testing model {combination[0]}, {combination[1]}, {combination[2]} ")
 
         p = combination[0]
         d = combination[1]
         q = combination[2]
-        P = combination[3]
-        D = combination[4]
-        Q = combination[5]
-        m = combination[6]
+
         try:
-            model = ARIMA(df_train[prediction_variable], order=(p, d, q), seasonal_order=(P, D, Q, m))
+            model = SARIMAX(df_train[prediction_variable], order=(p, d, q), exog=df_train[exog_vars] )
             model = model.fit()
             start = len(df_train)
             end = len(df_train) + len(df_test) - 1
-            pred = model.predict(start=start, end=end, typ='levels').rename('ARIMA predictions')
+            pred = model.predict.predict(start=start, end=end, exog=df_test[exog_vars],  typ='levels').rename('ARIMA predictions')
             rmse = sqrt(mean_squared_error(df_test.Close, pred))
-            models.append(ArimaModelStats(p, d, q, P, D, Q, m, abs(model.aic),
-                                               abs(model.bic), rmse, pred, df_test.Close))
+            mape_c = mape(df_test.Close,pred)
+            models.append(ArimaModelStats(p, d, q, abs(model.aic),
+                                               abs(model.bic), rmse, pred, df_test.Close, mape=mape_c))
 
         except:
             print('Model failed with error, resuming..')
@@ -156,17 +150,26 @@ def predict_with_windows(windows, train, test, lag_features):
 
 
 if __name__ == '__main__':
-    df = pd.read_csv('../doge_v1.csv', index_col='Date', parse_dates=True)
-    df = df.resample('w').mean().ffill()
+    warnings.filterwarnings('ignore')
+    dateparse = lambda dates: pd.datetime.strptime(dates, '%Y-%m-%d')
+    df = pd.read_csv('../doge_v1.csv', parse_dates=['Date'], date_parser=dateparse)
+    df.set_index(["Date"], drop=False, inplace=True)
+    df = df.resample('D').ffill()
+    df.reset_index(drop=True, inplace=True)
+    lag_features = ["High", "Volume", "twitter_followers", "reddit_average_posts_48h",
+                    "reddit_average_comments_48h", "total_issues", "dogecoin_monthly", "dogecoin"]
+    df.set_index(["Date"], drop=False, inplace=True)
+    df.info()
+    windows = [3, 7, 14, 21, 30, 60]
+    df = create_lagged_value_columns(lag_features, windows, df)
     testNum = round(df.shape[0] * 0.1)
-    p_range = range(0, 5)
-    q_range = range(0, 3)
-    d_range = range(0, 5)
-    P_range = [0]
-    D_range = [0]
-    Q_range = [0]
-    m_range = [0]
     train = df.iloc[:-testNum]
     test = df.iloc[-testNum:]
-    try_different_model_combinations(p_range, q_range, d_range, P_range, D_range, Q_range,
-                                     m_range, train, test, 'Close')
+    p_range = range(0,10)
+    q_range = range(0,10)
+    d_range = [0,1]
+    prediction_variable ="Close"
+    try_different_model_combinations(p_range, q_range, d_range, train, test, prediction_variable,
+                                     lag_features, windows)
+
+

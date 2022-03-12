@@ -149,6 +149,19 @@ def predict_with_windows(windows, train, test, lag_features):
         print(f"MAPE for {window} day lag prediction is {mape(test['Close'], forecast)}")
 
 
+def remove_lagged_features_with_window_time(window, features_to_remove, df, lag_features):
+    for feature in features_to_remove:
+        del df[f"{feature}_mean_lag{window}"]
+        lag_features.remove(feature)
+
+
+def train_test_split_continual(df, test_percentage):
+    testNum = round(df.shape[0] * test_percentage)
+    train = df.iloc[:-testNum]
+    test = df.iloc[-testNum:]
+
+    return train, test
+
 if __name__ == '__main__':
     warnings.filterwarnings('ignore')
     dateparse = lambda dates: pd.datetime.strptime(dates, '%Y-%m-%d')

@@ -133,11 +133,13 @@ def create_lagged_value_columns(lag_features, windows, df):
     df.set_index(["Date"], drop=False, inplace=True)
     return df
 
-def predict_with_windows(windows, train, test, lag_features):
+def predict_with_windows(windows, train, test, lag_features, is_advanced=False):
     for window in windows:
         exogs= []
         for feature in lag_features:
             exogs.append(f"{feature}_mean_lag{window}")
+            if is_advanced:
+                exogs.append(f"{feature}_std_lag{window}")
 
         model = auto_arima(train.Close, exogenous=train[exogs], trace=True, error_action="ignore",
                            suppress_warnings=True)
